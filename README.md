@@ -3,12 +3,11 @@
 <img width="1768" height="967" alt="image" src="https://github.com/user-attachments/assets/826eed23-9063-4dd5-8e75-b8c4134539d3" />
 
 
+A terminal-based aquarium simulation built in native PowerShell. It features dynamic marine life, interactive controls, realistic plant physics, depth-based water gradients, and high-performance differential screen rendering using ANSI escape codes for coloring.
+
 * **Run as a split terminal to enjoy your tank as you code**
 
 <img width="2142" height="1197" alt="image" src="https://github.com/user-attachments/assets/5b177f3e-f0de-4ee6-a99d-70123373a8e4" />
-
-
-A terminal-based aquarium simulation built in native PowerShell. It features dynamic marine life, interactive controls, realistic plant physics, depth-based water gradients, and high-performance differential screen rendering using ANSI escape codes for coloring.
 
 ## Features
 
