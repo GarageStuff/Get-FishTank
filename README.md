@@ -1,5 +1,7 @@
 # Get A PowerShell Fish Tank 🐠
 
+<img width="1768" height="967" alt="image" src="https://github.com/user-attachments/assets/826eed23-9063-4dd5-8e75-b8c4134539d3" />
+
 
 * **Run as a split terminal to enjoy your tank as you code**
 
