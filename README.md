@@ -1,6 +1,7 @@
 # Get A PowerShell Fish Tank 🐠
 
-<img width="1768" height="967" alt="image" src="https://github.com/user-attachments/assets/826eed23-9063-4dd5-8e75-b8c4134539d3" />
+<img width="2330" height="1280" alt="image" src="https://github.com/user-attachments/assets/3177de0a-e94f-4f33-8752-1d2afeddd847" />
+
 
 
 A terminal-based aquarium simulation built in native PowerShell. Watch colorful fish, seahorses, jellyfish, and a snail move through a changing tank, while seaweed sways and bubbles rise. The tank uses ANSI colors and updates only the parts of the screen that change.
