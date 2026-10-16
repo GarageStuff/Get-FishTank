@@ -1,7 +1,11 @@
 # ============================================================
 # Powershell Fish Tank
-# N: New Tank | F: Drop Food | S: Spawn Fish | K: Kill Fish | PgUp/PgDn: Speed | +/-: Font Size | Q/Esc: Quit
+# N: New Tank | F: Drop Food | S: Spawn Fish | K: Kill Fish | P: Pause | W: Water
+# PgUp/PgDn: Speed | Q/Esc: Quit
 # ============================================================
+
+$ESC = [char]27   # 5.1 has no `e escape
+$DEG = [char]176   # degree sign, kept out of the source so file encoding can't mangle it
 
 $script:ScreenWidth = 0
 $script:ScreenHeight = 0
@@ -16,57 +20,96 @@ $script:SeahorseList = [System.Collections.Generic.List[object]]::new()
 $script:FishList = [System.Collections.Generic.List[object]]::new()
 $script:FoodList = [System.Collections.Generic.List[object]]::new()
 $script:TankSnail = @{ XCoordinate = 2; YCoordinate = 2; SnailDirection = 1 }
-$script:CursorX = 0
-$script:CursorY = 0
 $script:TickDelay = 16
 $script:ShouldQuit = $false
+$script:IsPaused = $false
 
-# Font size state
-$script:WTSettingsPath = "$env:LOCALAPPDATA\Packages\Microsoft.WindowsTerminal_8wekyb3d8bbwe\LocalState\settings.json"
-$script:CurrentFontSize = 12
-if (Test-Path $script:WTSettingsPath) {
-    try {
-        $existingConfig = Get-Content $script:WTSettingsPath -Raw | ConvertFrom-Json
-        if ($existingConfig.profiles.defaults.fontSize) {
-            $script:CurrentFontSize = [int]$existingConfig.profiles.defaults.fontSize
-        }
-    } catch {}
-}
-
-$script:AnemoneMap = @{}
-$script:BubbleMap = @{}
-$script:JellyfishMap = @{}
-$script:SeahorseMap = @{}
-$script:DecorationMap = @{}
-$script:LastRenderBuffer = $null
+# ---------- render state ----------
+# all flat arrays, index = y * width + x
+$script:LastRenderBuffer = $null                                   # what's on screen right now
+$script:StaticLayer      = $null                                   # glass, sand, castle, anemones
+$script:OverlayLayer     = $null                                   # snail, jellyfish, seahorses
+$script:BubbleLayer      = $null                                   # bubbles
+$script:OverlayTouched   = [System.Collections.Generic.List[int]]::new()
+$script:BubbleTouched    = [System.Collections.Generic.List[int]]::new()
+$script:ChangedSet       = [System.Collections.Generic.HashSet[int]]::new()
+$script:FishStringCache  = @{}
+$script:WaterStrings     = $null
+$script:SwayIndex        = $null
+$script:SwayFrame        = -1
+$script:PlantColumnsByRow = $null
+$script:LastLegendKey    = $null
+$script:RenderBuilder    = [System.Text.StringBuilder]::new(65536)
+$script:WaveOffset       = -1
+$script:WaveShift        = 0
+$script:ResizeTimer      = [System.Diagnostics.Stopwatch]::StartNew()
+$script:PendingSize      = $null
 
 # Colors
 $script:FishColors = @(
-    "`e[38;5;202m", "`e[38;5;208m", "`e[38;5;214m",
-    "`e[38;5;215m", "`e[38;5;209m"
+    "${ESC}[38;5;202m", "${ESC}[38;5;208m", "${ESC}[38;5;214m",
+    "${ESC}[38;5;215m", "${ESC}[38;5;209m"
 )
 $script:TetraColors = @(
-    "`e[38;5;39m", "`e[38;5;45m", "`e[38;5;81m",
-    "`e[38;5;33m", "`e[38;5;75m"
+    "${ESC}[38;5;39m", "${ESC}[38;5;45m", "${ESC}[38;5;81m",
+    "${ESC}[38;5;33m", "${ESC}[38;5;75m"
 )
+$script:GreenColors = @(
+    "${ESC}[38;5;40m", "${ESC}[38;5;46m", "${ESC}[38;5;82m", "${ESC}[38;5;118m", "${ESC}[38;5;154m"
+)
+$script:PinkColors = @(
+    "${ESC}[38;5;198m", "${ESC}[38;5;205m", "${ESC}[38;5;211m", "${ESC}[38;5;213m", "${ESC}[38;5;218m"
+)
+# flavor picks the palette: 0 orange, 1 blue, 2 green, 3 pink
+$script:FishPalettes = @($script:FishColors, $script:TetraColors, $script:GreenColors, $script:PinkColors)
 $script:JellyfishColors = @(
-    "`e[38;5;39m"
+    "${ESC}[38;5;39m", "${ESC}[38;5;135m", "${ESC}[38;5;213m", "${ESC}[38;5;51m", "${ESC}[38;5;141m", "${ESC}[38;5;207m"
 )
 $script:SeahorseColors = @(
-    "`e[38;5;224m", "`e[38;5;223m", "`e[38;5;217m", "`e[38;5;222m"
+    "${ESC}[38;5;224m", "${ESC}[38;5;223m", "${ESC}[38;5;217m", "${ESC}[38;5;222m"
 )
 $script:PlantColors = @(
-    "`e[38;5;34m", "`e[38;5;28m", "`e[38;5;30m", "`e[38;5;118m",
-    "`e[38;5;46m", "`e[38;5;82m", "`e[38;5;40m", "`e[38;5;36m"
+    "${ESC}[38;5;34m", "${ESC}[38;5;28m", "${ESC}[38;5;30m", "${ESC}[38;5;118m",
+    "${ESC}[38;5;46m", "${ESC}[38;5;82m", "${ESC}[38;5;40m", "${ESC}[38;5;36m"
 )
 $script:AnemoneColors = @(
-    "`e[38;5;53m", "`e[38;5;54m", "`e[38;5;91m", "`e[38;5;92m",
-    "`e[38;5;55m", "`e[38;5;97m", "`e[38;5;134m", "`e[38;5;135m"
+    "${ESC}[38;5;53m", "${ESC}[38;5;54m", "${ESC}[38;5;91m", "${ESC}[38;5;92m",
+    "${ESC}[38;5;55m", "${ESC}[38;5;97m", "${ESC}[38;5;134m", "${ESC}[38;5;135m"
 )
 
+$script:WaterColors1 = @(
+    "${ESC}[38;5;17m", "${ESC}[38;5;18m", "${ESC}[38;5;19m", "${ESC}[38;5;20m"
+)
+$script:WaterColors2 = @(
+    "${ESC}[38;5;24m", "${ESC}[38;5;25m", "${ESC}[38;5;26m", "${ESC}[38;5;27m"
+)
+$script:WaterColors3 = @(
+    "${ESC}[38;5;30m", "${ESC}[38;5;31m", "${ESC}[38;5;32m", "${ESC}[38;5;33m"
+)
+$script:WaterColors4 = @(
+    "", "", "", ""
+)
+$script:CurrentWaterGradient = 0
+
+# prebuilt strings so we're not rebuilding them every frame
+$script:GlassString  = "${ESC}[38;5;25m|${ESC}[0m"
+$script:SandString   = "${ESC}[1;38;5;136m=${ESC}[0m"
+$script:FoodString   = "${ESC}[38;5;172m*${ESC}[0m"
+$script:SnailString  = "${ESC}[1;38;5;255m@${ESC}[0m"
+$script:BubbleStringO   = "${ESC}[1;38;5;123mo${ESC}[0m"
+$script:BubbleStringDeg = "${ESC}[1;38;5;123m${DEG}${ESC}[0m"
+# wave pattern, 0 = low, 2 = crest
+$script:WavePattern = @(0, 1, 2, 2, 2, 1, 0, 0)
+$script:WaveStrings = @("${ESC}[38;5;32m_${ESC}[0m", "${ESC}[38;5;38m-${ESC}[0m", "${ESC}[1;38;5;123m~${ESC}[0m")
+# colorIndex * 3 + sway (0 '/', 1 '\', 2 '|')
+$script:PlantStrings = @(foreach ($pc in $script:PlantColors) { "$pc/${ESC}[0m"; "$pc\${ESC}[0m"; "$pc|${ESC}[0m" })
+
+# tall anemone top rows, columns -1 0 +1
+$script:TallPatterns = @('\|/', ' |/', '\| ', ' | ', '\ /', '/|\')
+
 # Fish sprites
-$script:FishSpritesRight = @('><>', '>*(*>', '>*((*>', '>*(((*>', '>°(}}-}')
-$script:FishSpritesLeft  = @('<><', '<*)*<', '<*))*<', '<*)))*<', '<°){{-{')
+$script:FishSpritesRight = @('><>', '>*(*>', '>*((*>', '>*(((*>', ('>' + $DEG + '(}}-}'))
+$script:FishSpritesLeft  = @('<><', '<*)*<', '<*))*<', '<*)))*<', ('<' + $DEG + '){{-{'))
 $script:SeahorseSpriteRight = '&'
 $script:SeahorseSpriteLeft  = '&'
 
@@ -82,6 +125,7 @@ function Initialize-Cell([string]$cellType = "air") {
     }
 }
 
+# anything that changes the grid goes through here, so mark it changed here
 function Set-GridCell([int]$x, [int]$y, [string]$cellType) {
     if ($x -lt 0 -or $x -ge $script:ScreenWidth -or $y -lt 0 -or $y -ge $script:ScreenHeight) { return }
     $currentCell = $script:TankGrid[$x, $y]
@@ -96,6 +140,25 @@ function Set-GridCell([int]$x, [int]$y, [string]$cellType) {
         "glass" { 100 }
         default { 0 }
     }
+    [void]$script:ChangedSet.Add(($y * $script:ScreenWidth) + $x)
+}
+
+function Set-StaticCell([int]$x, [int]$y, [string]$char, [string]$color) {
+    if ($x -le 0 -or $x -ge ($script:ScreenWidth - 1) -or $y -lt 1 -or $y -ge $script:ScreenHeight) { return }
+    $script:StaticLayer[($y * $script:ScreenWidth) + $x] = "$color$char${ESC}[0m"
+}
+
+function Set-OverlayCell([int]$x, [int]$y, [string]$text) {
+    if ($x -lt 0 -or $x -ge $script:ScreenWidth -or $y -lt 0 -or $y -ge $script:ScreenHeight) { return }
+    $idx = ($y * $script:ScreenWidth) + $x
+    $script:OverlayLayer[$idx] = $text
+    $script:OverlayTouched.Add($idx)
+    [void]$script:ChangedSet.Add($idx)
+}
+
+function Set-AllCellsChanged {
+    $total = $script:ScreenWidth * $script:ScreenHeight
+    for ($i = $script:ScreenWidth; $i -lt $total; $i++) { [void]$script:ChangedSet.Add($i) }
 }
 
 function Get-FishLength([int]$fishSize) {
@@ -106,7 +169,7 @@ function New-FishType {
     $script:FishIdCounter++
     $fishSize   = $script:RandomGenerator.Next($script:FishSpritesRight.Count)
     $fishColor  = $script:RandomGenerator.Next($script:FishColors.Count)
-    $fishFlavor = if ($script:RandomGenerator.Next(4) -eq 0) { 1 } else { 0 }
+    $fishFlavor = $script:RandomGenerator.Next($script:FishPalettes.Count)
     return ($script:FishIdCounter % 1000) * 1000 + $fishFlavor * 100 + $fishColor * 10 + $fishSize
 }
 
@@ -116,11 +179,12 @@ function Get-FishFlavor([int]$fishType) { return [Math]::Floor(($fishType % 1000
 
 function Test-CanSpawnFish([int]$x, [int]$y, [int]$fishType, [int]$fishDirection) {
     $fishLength = Get-FishLength (Get-FishSize $fishType)
+    $maxX = $script:ScreenWidth - 1
     for ($i = 0; $i -lt $fishLength; $i++) {
         $checkX = $x - ($i * $fishDirection)
-        if ($checkX -lt 1 -or $checkX -ge ($script:ScreenWidth - 1)) { return $false }
+        if ($checkX -lt 1 -or $checkX -ge $maxX) { return $false }
         $targetType = $script:TankGrid[$checkX, $y].Type
-        if ($targetType -notin @("water", "plant")) { return $false }
+        if ($targetType -ne "water" -and $targetType -ne "plant") { return $false }
     }
     return $true
 }
@@ -170,13 +234,44 @@ function Spawn-Fish([int]$x, [int]$y, [int]$fishType, [int]$fishDirection) {
     return $true
 }
 
+function Update-WaterCache {
+    $height = $script:ScreenHeight
+    $script:WaterStrings = New-Object 'string[]' $height
+    for ($y = 1; $y -lt $height; $y++) {
+        if ($script:CurrentWaterGradient -eq 3) {
+            $script:WaterStrings[$y] = " "
+        } else {
+            $script:WaterStrings[$y] = (Get-WaterColor $y) + ".${ESC}[0m"
+        }
+    }
+}
+
 function Initialize-World([int]$width, [int]$height) {
     [Console]::CursorVisible = $false
     [Console]::Clear()
     $script:ScreenWidth = $width
     $script:ScreenHeight = $height
     $script:TankGrid = New-Object 'object[,]' $width, $height
-    $script:LastRenderBuffer = New-Object 'string[,]' $width, $height
+    $total = $width * $height
+
+    # render state
+    $script:LastRenderBuffer = New-Object 'string[]' $total
+    $script:StaticLayer      = New-Object 'string[]' $total
+    $script:OverlayLayer     = New-Object 'string[]' $total
+    $script:BubbleLayer      = New-Object 'string[]' $total
+    $script:OverlayTouched.Clear()
+    $script:BubbleTouched.Clear()
+    $script:ChangedSet = [System.Collections.Generic.HashSet[int]]::new()
+    $script:FishStringCache = @{}
+    $script:SwayIndex = New-Object 'int[]' $height
+    for ($i = 0; $i -lt $height; $i++) { $script:SwayIndex[$i] = -1 }
+    $script:SwayFrame = -1
+    $script:LastLegendKey = $null
+    $script:PlantColumnsByRow = New-Object 'object[]' $height
+    for ($i = 0; $i -lt $height; $i++) {
+        $script:PlantColumnsByRow[$i] = [System.Collections.Generic.List[int]]::new()
+    }
+
     $script:FishList.Clear()
     $script:FoodList.Clear()
     $script:BubbleList.Clear()
@@ -186,9 +281,14 @@ function Initialize-World([int]$width, [int]$height) {
             $script:TankGrid[$x, $y] = Initialize-Cell
             if ($x -eq 0 -or $x -eq ($width-1) -or $y -eq 0) {
                 Set-GridCell $x $y "glass"
+                $script:StaticLayer[($y * $width) + $x] = $script:GlassString
             }
             elseif ($y -eq 1) {
                 Set-GridCell $x $y "sand"
+                $script:StaticLayer[($y * $width) + $x] = $script:SandString
+            }
+            elseif ($y -eq ($height - 1)) {
+                Set-GridCell $x $y "wave"
             }
             else {
                 Set-GridCell $x $y "water"
@@ -196,16 +296,20 @@ function Initialize-World([int]$width, [int]$height) {
         }
     }
 
+    $script:WaveOffset = -1
+    Update-WaterCache
+
     # Jellyfish
     $script:JellyfishList = [System.Collections.Generic.List[object]]::new()
-    $jellyX = $script:RandomGenerator.Next(3, [Math]::Max(4, $width - 7))
-    $jellyY = $script:RandomGenerator.Next(3, [Math]::Max(4, $height - 6))
-    $script:JellyfishList.Add([pscustomobject]@{
-        XCoordinate = $jellyX
-        YCoordinate = $jellyY
-        PulseState  = $false
-        ColorIndex  = 0
-    })
+    $jellyfishCount = $script:RandomGenerator.Next(1, 4)
+    for ($j = 0; $j -lt $jellyfishCount; $j++) {
+        $script:JellyfishList.Add([pscustomobject]@{
+            XCoordinate = $script:RandomGenerator.Next(3, [Math]::Max(4, $width - 7))
+            YCoordinate = $script:RandomGenerator.Next(3, [Math]::Max(4, $height - 6))
+            PulseState  = ($script:RandomGenerator.Next(2) -eq 0)
+            ColorIndex  = $script:RandomGenerator.Next($script:JellyfishColors.Count)
+        })
+    }
 
     # Seahorses
     $script:SeahorseList = [System.Collections.Generic.List[object]]::new()
@@ -233,6 +337,7 @@ function Initialize-World([int]$width, [int]$height) {
             for ($plantY = 2; $plantY -lt (2 + $plantHeight) -and $plantY -lt ($height-1); $plantY++) {
                 Set-GridCell $plantX $plantY "plant"
                 $script:TankGrid[$plantX, $plantY].PlantDir = $plantColorIndex
+                $script:PlantColumnsByRow[$plantY].Add($plantX)
             }
         }
     }
@@ -240,30 +345,35 @@ function Initialize-World([int]$width, [int]$height) {
     # Starting fish
     $startingFishCount = $script:RandomGenerator.Next(5, 9)
     for ($f = 0; $f -lt $startingFishCount; $f++) {
-        $fishX = $script:RandomGenerator.Next(6, $width - 6)
-        $fishY = $script:RandomGenerator.Next(4, $height - 4)
-        $fishDirection = if ($script:RandomGenerator.Next(2) -eq 0) { 1 } else { -1 }
         $fishType = New-FishType
-        if (Spawn-Fish $fishX $fishY $fishType $fishDirection) {
-            $script:FishList.Add([pscustomobject]@{
-                XCoordinate = $fishX
-                YCoordinate = $fishY
-                FishType    = $fishType
-                Dir         = $fishDirection
-            })
+        for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            $fishX = $script:RandomGenerator.Next(6, $width - 6)
+            $fishY = $script:RandomGenerator.Next(4, $height - 4)
+            $fishDirection = if ($script:RandomGenerator.Next(2) -eq 0) { 1 } else { -1 }
+            if (Spawn-Fish $fishX $fishY $fishType $fishDirection) {
+                $script:FishList.Add([pscustomobject]@{
+                    XCoordinate = $fishX
+                    YCoordinate = $fishY
+                    FishType    = $fishType
+                    Dir         = $fishDirection
+                })
+                break
+            }
         }
     }
 
     # ---------- Castle (random X along the bottom) ----------
-    $script:DecorationMap.Clear()
-    $castleColor = "`e[1;38;5;246m"
+    $castleColor = "${ESC}[1;38;5;250m"
     $castleSprite = @(
-        "  /\    /\  ",
-        " /..\  /..\ ",
-        " |[]|__|[]| ",
-        " |--|  |--| ",
-        " |[]|__|[]| ",
-        " |[][[]][]| "
+        "          /\          ",
+        "         /..\         ",
+        "   /\    |[]|    /\   ",
+        "  |--|   |--|   |--|  ",
+        "  |[]|   |[]|   |[]|  ",
+        "  |--|___|--|___|--|  ",
+        "  |-[]-[]-[]-[]-[]-|  ",
+        "  |[]||[]/  \[]||[]|  ",
+        "  |[]||[]|  |[]||[]|  "
     )
 
     $castleWidth = $castleSprite[0].Length
@@ -281,11 +391,7 @@ function Initialize-World([int]$width, [int]$height) {
         for ($col = 0; $col -lt $line.Length; $col++) {
             $char = $line[$col]
             if ($char -ne ' ') {
-                $targetX = $castleX + $col
-                if ($targetX -gt 0 -and $targetX -lt ($width - 1)) {
-                    $key = ($targetY * $width) + $targetX
-                    $script:DecorationMap[$key] = @{ Char = $char; Col = $castleColor }
-                }
+                Set-StaticCell ($castleX + $col) $targetY ([string]$char) $castleColor
             }
         }
     }
@@ -316,7 +422,7 @@ function Initialize-World([int]$width, [int]$height) {
             $anemoneColor = $script:AnemoneColors[$script:RandomGenerator.Next($script:AnemoneColors.Count)]
             $isTall = ($script:RandomGenerator.Next(100) -lt 30)
             $isWide = ($script:RandomGenerator.Next(100) -lt 30)
-           
+
             $script:AnemoneList.Add([pscustomobject]@{
                 CenterX = $anemoneX
                 Y       = 2
@@ -327,128 +433,41 @@ function Initialize-World([int]$width, [int]$height) {
         }
     }
 
-    $script:AnemoneMap.Clear()
     foreach ($anemone in $script:AnemoneList) {
         $anemoneColor = $anemone.Color
-        $chance = ($script:RandomGenerator.Next(6))
-        if ($anemone.IsWide) {
-            $script:AnemoneMap[($anemone.Y * $width) + ($anemone.CenterX - 2)] = @{ Char = '\'; Col = $anemoneColor }
-            $script:AnemoneMap[($anemone.Y * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-            $script:AnemoneMap[($anemone.Y * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-            $script:AnemoneMap[($anemone.Y * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor }
-            $script:AnemoneMap[($anemone.Y * $width) + ($anemone.CenterX + 2)] = @{ Char = '/'; Col = $anemoneColor }
-            if ($anemone.IsTall) {
-                switch ($chance){
-                0 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor } 
+        $variant = $script:RandomGenerator.Next(6)
+
+        # base row
+        if ($anemone.IsWide) { $baseRow = '\\|//'; $baseStart = $anemone.CenterX - 2 }
+        else                 { $baseRow = '\|/';   $baseStart = $anemone.CenterX - 1 }
+        for ($i = 0; $i -lt $baseRow.Length; $i++) {
+            Set-StaticCell ($baseStart + $i) $anemone.Y ([string]$baseRow[$i]) $anemoneColor
+        }
+
+        # second row if tall
+        if ($anemone.IsTall) {
+            $pattern = $script:TallPatterns[$variant]
+            for ($i = 0; $i -lt 3; $i++) {
+                if ($pattern[$i] -ne ' ') {
+                    Set-StaticCell ($anemone.CenterX - 1 + $i) ($anemone.Y + 1) ([string]$pattern[$i]) $anemoneColor
                 }
-                1 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor } 
-                }
-                2 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                }
-                3 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                }
-                4 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor } 
-                }
-                5 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '/'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '\'; Col = $anemoneColor } 
-                }
-                }
-                
-            }
-        } else {
-            $script:AnemoneMap[($anemone.Y * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-            $script:AnemoneMap[($anemone.Y * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-            $script:AnemoneMap[($anemone.Y * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor }
-            if ($anemone.IsTall) {
-                switch ($chance){
-                0 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor } 
-                }
-                1 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor } 
-                }
-                2 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                }
-                3 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                }
-                4 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '\'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '/'; Col = $anemoneColor } 
-                }
-                5 { 
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX - 1)] = @{ Char = '/'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + $anemone.CenterX]       = @{ Char = '|'; Col = $anemoneColor }
-                    $script:AnemoneMap[(($anemone.Y + 1) * $width) + ($anemone.CenterX + 1)] = @{ Char = '\'; Col = $anemoneColor } 
-                }
-            }
             }
         }
     }
 
-    $script:CursorX = [int]($width / 2)
-    $script:CursorY = [int]($height / 2)
     $script:TankSnail.XCoordinate = 2
     $script:TankSnail.YCoordinate = 2
     $script:TankSnail.SnailDirection = 1
-}
-
-function Set-TerminalFontSize([int]$NewSize) {
-    $SettingsPath = $script:WTSettingsPath
-    if (Test-Path $SettingsPath) {
-        $Config = Get-Content $SettingsPath -Raw | ConvertFrom-Json
-        if ($Config.profiles.defaults) {
-            $Config.profiles.defaults | Add-Member -NotePropertyName "fontSize" -NotePropertyValue $NewSize -Force
-        } else {
-            $Config.profiles | Add-Member -NotePropertyName "defaults" -NotePropertyValue @{ fontSize = $NewSize } -Force
-        }
-        $Config | ConvertTo-Json -Depth 100 | Set-Content $SettingsPath
-        Start-Sleep -Milliseconds 250
-    }
 }
 
 function Get-Input {
     while ([Console]::KeyAvailable) {
         $keyInfo = [Console]::ReadKey($true)
         switch ($keyInfo.Key) {
-            'OemPlus' {
-                if ($script:CurrentFontSize -lt 32) {
-                    $script:CurrentFontSize += 2
-                    Set-TerminalFontSize $script:CurrentFontSize
-                    Initialize-World ([Console]::WindowWidth) ([Console]::WindowHeight - 1)
-                }
-            }
-            'OemMinus' {
-                if ($script:CurrentFontSize -gt 8) {
-                    $script:CurrentFontSize -= 2
-                    Set-TerminalFontSize $script:CurrentFontSize
-                    Initialize-World ([Console]::WindowWidth) ([Console]::WindowHeight - 1)
-                }
-            }
-            'LeftArrow'  { $script:CursorX = [Math]::Max(1, $script:CursorX - 1) }
-            'RightArrow' { $script:CursorX = [Math]::Min($script:ScreenWidth - 2, $script:CursorX + 1) }
-            'UpArrow'    { $script:CursorY = [Math]::Min($script:ScreenHeight - 2, $script:CursorY + 1) }
-            'DownArrow'  { $script:CursorY = [Math]::Max(1, $script:CursorY - 1) }
             'PageUp'     { $script:TickDelay = [Math]::Max(0, $script:TickDelay - 2) }
             'PageDown'   { $script:TickDelay = [Math]::Min(5000, $script:TickDelay + 2) }
             'N' { Initialize-World ([Console]::WindowWidth) ([Console]::WindowHeight - 1) }
+            'P' { $script:IsPaused = -not $script:IsPaused }
             'F' {
                 $foodX = $script:RandomGenerator.Next(1, $script:ScreenWidth - 1)
                 $foodY = $script:ScreenHeight - 2
@@ -477,6 +496,11 @@ function Get-Input {
                     $script:FishList.RemoveAt($fishIndex)
                 }
             }
+            'W' {   # Cycle water gradients
+                $script:CurrentWaterGradient = ($script:CurrentWaterGradient + 1) % 4
+                Update-WaterCache
+                Set-AllCellsChanged
+            }
             'Q'      { $script:ShouldQuit = $true }
             'Escape' { $script:ShouldQuit = $true }
             default {}
@@ -494,19 +518,22 @@ function Update-FishHead($fishObject) {
 
     $foodFound = $false
     $targetDeltaX = 0; $targetDeltaY = 0
-    foreach ($deltaX in -4..4) {
-        foreach ($deltaY in -2..2) {
-            $checkX = $x + $deltaX; $checkY = $y + $deltaY
-            if ($checkX -ge 1 -and $checkX -lt ($script:ScreenWidth-1) -and $checkY -ge 1 -and $checkY -lt ($script:ScreenHeight-1)) {
-                if ($script:TankGrid[$checkX, $checkY].Type -eq "food") {
-                    if ([Math]::Abs($deltaX) -le 1 -and [Math]::Abs($deltaY) -le 1) {
-                        Set-GridCell $checkX $checkY "water"
-                        $foodIndex = $script:FoodList.FindIndex({ param($item) $item.XCoordinate -eq $checkX -and $item.YCoordinate -eq $checkY })
-                        if ($foodIndex -ge 0) { $script:FoodList.RemoveAt($foodIndex) }
-                    } else {
-                        $foodFound = $true
-                        $targetDeltaX = [Math]::Sign($deltaX)
-                        $targetDeltaY = [Math]::Sign($deltaY)
+    # no point scanning if there's no food
+    if ($script:FoodList.Count -gt 0) {
+        foreach ($deltaX in -4..4) {
+            foreach ($deltaY in -2..2) {
+                $checkX = $x + $deltaX; $checkY = $y + $deltaY
+                if ($checkX -ge 1 -and $checkX -lt ($script:ScreenWidth-1) -and $checkY -ge 1 -and $checkY -lt ($script:ScreenHeight-1)) {
+                    if ($script:TankGrid[$checkX, $checkY].Type -eq "food") {
+                        if ([Math]::Abs($deltaX) -le 1 -and [Math]::Abs($deltaY) -le 1) {
+                            Set-GridCell $checkX $checkY "water"
+                            $foodIndex = $script:FoodList.FindIndex({ param($item) $item.XCoordinate -eq $checkX -and $item.YCoordinate -eq $checkY })
+                            if ($foodIndex -ge 0) { $script:FoodList.RemoveAt($foodIndex) }
+                        } else {
+                            $foodFound = $true
+                            $targetDeltaX = [Math]::Sign($deltaX)
+                            $targetDeltaY = [Math]::Sign($deltaY)
+                        }
                     }
                 }
             }
@@ -542,7 +569,7 @@ function Update-FishHead($fishObject) {
         $script:BubbleList.Add([pscustomobject]@{
             XCoordinate = $newX
             YCoordinate = $newY + 1
-            Char = if ($script:RandomGenerator.Next(2) -eq 0) { "o" } else { "°" }
+            Char = if ($script:RandomGenerator.Next(2) -eq 0) { "o" } else { "$DEG" }
         })
     }
 
@@ -639,11 +666,14 @@ function Update-World {
             $script:FoodList.RemoveAt($i)
             continue
         }
-        if ($y -gt 1 -and $script:TankGrid[$x, ($y-1)].Type -in @("water", "air")) {
-            Set-GridCell $x $y "water"
-            $newFoodY = $y - 1
-            Set-GridCell $x $newFoodY "food"
-            $foodItem.YCoordinate = $newFoodY
+        if ($y -gt 1) {
+            $belowType = $script:TankGrid[$x, ($y-1)].Type
+            if ($belowType -eq "water" -or $belowType -eq "air") {
+                Set-GridCell $x $y "water"
+                $newFoodY = $y - 1
+                Set-GridCell $x $newFoodY "food"
+                $foodItem.YCoordinate = $newFoodY
+            }
         }
     }
 
@@ -663,7 +693,7 @@ function Update-World {
         $script:BubbleList.Add([pscustomobject]@{
             XCoordinate = $script:RandomGenerator.Next(2, $script:ScreenWidth-2)
             YCoordinate = 2
-            Char = if ($script:RandomGenerator.Next(2) -eq 0) { "o" } else { "°" }
+            Char = if ($script:RandomGenerator.Next(2) -eq 0) { "o" } else { "$DEG" }
         })
     }
 
@@ -698,155 +728,263 @@ function Update-World {
 
 function Get-WaterColor([int]$y) {
     $ratio = ($y - 2) / [Math]::Max(1, $script:ScreenHeight - 3)
-    if ($ratio -lt 0.45) { return "`e[38;5;17m" }
-    if ($ratio -lt 0.75) { return "`e[38;5;18m" }
-    if ($ratio -lt 0.90) { return "`e[38;5;19m" }
-    return "`e[38;5;20m"
+
+    $waterColors = switch ($script:CurrentWaterGradient) {
+        0 { $script:WaterColors1 }
+        1 { $script:WaterColors2 }
+        2 { $script:WaterColors3 }
+        3 { $script:WaterColors4 }
+        default { $script:WaterColors1 }
+    }
+
+    if ($ratio -lt 0.45) { return $waterColors[0] }
+    if ($ratio -lt 0.75) { return $waterColors[1] }
+    if ($ratio -lt 0.90) { return $waterColors[2] }
+    return $waterColors[3]
 }
 
-function Draw-World {
-    $script:BubbleMap.Clear()
+# only redraw seaweed rows whose sway changed
+function Update-SwayCache {
+    if ($script:SwayFrame -eq $script:CurrentFrame) { return }
+    $script:SwayFrame = $script:CurrentFrame
+    $width = $script:ScreenWidth
+    $phase = $script:CurrentFrame * 0.05
+    for ($y = 2; $y -lt ($script:ScreenHeight - 1); $y++) {
+        $sway = [Math]::Round([Math]::Sin($phase + (($y - 2) * 0.3)) * 1.2)
+        $swayIdx = if ($sway -gt 0) { 0 } elseif ($sway -lt 0) { 1 } else { 2 }
+        if ($script:SwayIndex[$y] -ne $swayIdx) {
+            $script:SwayIndex[$y] = $swayIdx
+            foreach ($plantX in $script:PlantColumnsByRow[$y]) {
+                [void]$script:ChangedSet.Add(($y * $width) + $plantX)
+            }
+        }
+    }
+}
+
+# redo the moving stuff every frame, clear last frame's cells and mark them changed
+function Update-Overlays {
+    $width = $script:ScreenWidth
+    $height = $script:ScreenHeight
+    $overlay = $script:OverlayLayer
+    $bubbleLayer = $script:BubbleLayer
+    $changed = $script:ChangedSet
+
+    foreach ($i in $script:OverlayTouched) { $overlay[$i] = ''; [void]$changed.Add($i) }
+    $script:OverlayTouched.Clear()
+    foreach ($i in $script:BubbleTouched) { $bubbleLayer[$i] = ''; [void]$changed.Add($i) }
+    $script:BubbleTouched.Clear()
+
+    # Bubbles
     foreach ($bubble in $script:BubbleList) {
-        if ($bubble.XCoordinate -ge 0 -and $bubble.XCoordinate -lt $script:ScreenWidth -and $bubble.YCoordinate -ge 0 -and $bubble.YCoordinate -lt $script:ScreenHeight) {
-            $script:BubbleMap[($bubble.YCoordinate * $script:ScreenWidth) + $bubble.XCoordinate] = $bubble.Char
+        $bx = $bubble.XCoordinate; $by = $bubble.YCoordinate
+        if ($bx -ge 0 -and $bx -lt $width -and $by -ge 0 -and $by -lt $height) {
+            $idx = ($by * $width) + $bx
+            $bubbleLayer[$idx] = if ($bubble.Char -eq "o") { $script:BubbleStringO } else { $script:BubbleStringDeg }
+            $script:BubbleTouched.Add($idx)
+            [void]$changed.Add($idx)
         }
     }
 
-    $script:JellyfishMap.Clear()
+    # Seahorses
+    foreach ($seahorse in $script:SeahorseList) {
+        $seahorseColor = $script:SeahorseColors[$seahorse.ColorIndex % $script:SeahorseColors.Count]
+        $seahorseSprite = if ($seahorse.Dir -eq 1) { $script:SeahorseSpriteRight } else { $script:SeahorseSpriteLeft }
+        for ($k = 0; $k -lt $seahorseSprite.Length; $k++) {
+            Set-OverlayCell ($seahorse.XCoordinate + $k) $seahorse.YCoordinate "$seahorseColor$($seahorseSprite[$k])${ESC}[0m"
+        }
+    }
+
+    # Jellyfish
     foreach ($jellyfish in $script:JellyfishList) {
         $jellyColor = $script:JellyfishColors[$jellyfish.ColorIndex % $script:JellyfishColors.Count]
         $capSprite = "(())"
         $tentacleSprite = if ($jellyfish.PulseState) { "\||/" } else { "/||\" }
         for ($k = 0; $k -lt 4; $k++) {
-            $jellyXCoord = $jellyfish.XCoordinate + $k
-            if ($jellyXCoord -ge 0 -and $jellyXCoord -lt $script:ScreenWidth) {
-                $jellyY1 = $jellyfish.YCoordinate + 1
-                $jellyY0 = $jellyfish.YCoordinate
-                if ($jellyY1 -ge 0 -and $jellyY1 -lt $script:ScreenHeight) {
-                    $script:JellyfishMap[($jellyY1 * $script:ScreenWidth) + $jellyXCoord] = @{ Char = $capSprite[$k]; Col = $jellyColor }
+            $jx = $jellyfish.XCoordinate + $k
+            Set-OverlayCell $jx ($jellyfish.YCoordinate + 1) "$jellyColor$($capSprite[$k])${ESC}[0m"
+            Set-OverlayCell $jx $jellyfish.YCoordinate "$jellyColor$($tentacleSprite[$k])${ESC}[0m"
+        }
+    }
+
+    # Snail
+    Set-OverlayCell $script:TankSnail.XCoordinate $script:TankSnail.YCoordinate $script:SnailString
+}
+
+# waves move one step every 6 frames
+function Update-Waves {
+    $offset = [int][Math]::Floor($script:CurrentFrame / 6)
+    if ($offset -eq $script:WaveOffset) { return }
+    $script:WaveOffset = $offset
+    $script:WaveShift = $offset % $script:WavePattern.Count
+    $topRowStart = ($script:ScreenHeight - 1) * $script:ScreenWidth
+    for ($x = 1; $x -lt ($script:ScreenWidth - 1); $x++) {
+        [void]$script:ChangedSet.Add($topRowStart + $x)
+    }
+}
+
+# rebuild the tank when the window changes size. wait for the size to settle
+# first so dragging the edge doesn't rebuild it a hundred times
+function Update-Resize {
+    if ($script:ResizeTimer.ElapsedMilliseconds -lt 250) { return }
+    $script:ResizeTimer.Restart()
+    $windowWidth = [Console]::WindowWidth
+    $windowHeight = [Console]::WindowHeight - 1
+    if ($windowWidth -ne $script:ScreenWidth -or $windowHeight -ne $script:ScreenHeight) {
+        $newSize = "$windowWidth,$windowHeight"
+        if ($newSize -eq $script:PendingSize) {
+            $script:PendingSize = $null
+            if ($windowWidth -ge 30 -and $windowHeight -ge 14) {
+                Initialize-World $windowWidth $windowHeight
+            }
+        } else {
+            $script:PendingSize = $newSize
+        }
+    } else {
+        $script:PendingSize = $null
+    }
+}
+
+function Draw-World {
+    $width  = $script:ScreenWidth
+    $height = $script:ScreenHeight
+
+    Update-SwayCache
+    Update-Waves
+    Update-Overlays
+
+    $sb = $script:RenderBuilder
+    [void]$sb.Clear()
+
+    # legend + clock
+    $timeString = [DateTime]::Now.ToString("hh:mm:ss tt")
+    $legendKey = "$timeString|$($script:TickDelay)|$($script:IsPaused)"
+    if ($legendKey -ne $script:LastLegendKey) {
+        $script:LastLegendKey = $legendKey
+        $pausedTag = if ($script:IsPaused) { "[PAUSED] " } else { "" }
+        $legend = " ${pausedTag}N: New | F: Food | S: Spawn | K: Kill | P: Pause | W: Water | PgUp/PgDn: Speed ($($script:TickDelay)ms) | Q/Esc: Quit "
+        if ($legend.Length -ge $width) {
+            $legend = $legend.Substring(0, $width)
+        } else {
+            $remainingSpace = $width - $legend.Length - $timeString.Length
+            if ($remainingSpace -lt 0) { $remainingSpace = 0 }
+            $legend = $legend + (" " * $remainingSpace) + $timeString
+        }
+        [void]$sb.Append("${ESC}[").Append($height).Append(';1H').Append("${ESC}[38;5;244m").Append($legend).Append("${ESC}[0m")
+    }
+
+    # only the changed cells
+    $changed = $script:ChangedSet
+    if ($changed.Count -gt 0) {
+        $indices = New-Object 'int[]' $changed.Count
+        $changed.CopyTo($indices)
+        $changed.Clear()
+        [Array]::Sort($indices)
+
+        $grid        = $script:TankGrid
+        $buffer      = $script:LastRenderBuffer
+        $overlay     = $script:OverlayLayer
+        $static      = $script:StaticLayer
+        $bubbleLayer = $script:BubbleLayer
+        $waterStrs   = $script:WaterStrings
+        $plantStrs   = $script:PlantStrings
+        $swayIndex   = $script:SwayIndex
+        $fishCache   = $script:FishStringCache
+        $plantCount  = $script:PlantColors.Count
+        $waveStrs    = $script:WaveStrings
+        $wavePattern = $script:WavePattern
+        $waveLen     = $wavePattern.Count
+        $waveShift   = $script:WaveShift
+        $prevWritten = -2
+
+        foreach ($idx in $indices) {
+            if ($idx -lt $width) { continue }     # row 0 is the legend
+            $x = $idx % $width
+            $y = [int](($idx - $x) / $width)
+
+            $s = $overlay[$idx]
+            if (-not $s) { $s = $static[$idx] }
+            if (-not $s) {
+                $cell = $grid[$x, $y]
+                $type = $cell.Type
+                if ($type -eq "water") {
+                    $s = $bubbleLayer[$idx]
+                    if (-not $s) { $s = $waterStrs[$y] }
                 }
-                if ($jellyY0 -ge 0 -and $jellyY0 -lt $script:ScreenHeight) {
-                    $script:JellyfishMap[($jellyY0 * $script:ScreenWidth) + $jellyXCoord] = @{ Char = $tentacleSprite[$k]; Col = $jellyColor }
+                elseif ($type -eq "fish") {
+                    $fishType = $cell.FishType
+                    $segment = $cell.Segment
+                    $fishDir = $cell.Dir
+                    $cacheKey = ($fishType * 16) + $(if ($fishDir -eq 1) { 8 } else { 0 }) + $segment
+                    $s = $fishCache[$cacheKey]
+                    if (-not $s) {
+                        $fishSize = Get-FishSize $fishType
+                        $fishColor = Get-FishColor $fishType
+                        $fishFlavor = Get-FishFlavor $fishType
+                        $fishSprite = if ($fishDir -eq 1) { $script:FishSpritesRight[$fishSize] } else { $script:FishSpritesLeft[$fishSize] }
+                        $fishChar = if ($segment -lt $fishSprite.Length) { $fishSprite[$segment] } else { ">" }
+                        $fishPalette = $script:FishPalettes[[int]$fishFlavor]
+                        $segmentColor = $fishPalette[($fishColor + $segment) % $fishPalette.Count]
+                        $s = "${segmentColor}${fishChar}${ESC}[0m"
+                        $fishCache[$cacheKey] = $s
+                    }
                 }
+                elseif ($type -eq "plant") {
+                    $s = $plantStrs[(($cell.PlantDir % $plantCount) * 3) + $swayIndex[$y]]
+                }
+                elseif ($type -eq "food") {
+                    $s = $script:FoodString
+                }
+                elseif ($type -eq "wave") {
+                    $s = $waveStrs[$wavePattern[($x + $waveLen - $waveShift) % $waveLen]]
+                }
+                else {
+                    $s = " "
+                }
+            }
+
+            if ($buffer[$idx] -ne $s) {
+                $buffer[$idx] = $s
+                # only move the cursor if we skipped some cells
+                if ($idx -ne ($prevWritten + 1) -or $x -eq 0) {
+                    [void]$sb.Append("${ESC}[").Append($height - $y).Append(';').Append($x + 1).Append('H')
+                }
+                [void]$sb.Append($s)
+                $prevWritten = $idx
             }
         }
     }
 
-    $script:SeahorseMap.Clear()
-    foreach ($seahorse in $script:SeahorseList) {
-        $seahorseColor = $script:SeahorseColors[$seahorse.ColorIndex % $script:SeahorseColors.Count]
-        $seahorseSprite = if ($seahorse.Dir -eq 1) { $script:SeahorseSpriteRight } else { $script:SeahorseSpriteLeft }
-        for ($k = 0; $k -lt $seahorseSprite.Length; $k++) {
-            $seahorseXCoord = $seahorse.XCoordinate + $k
-            if ($seahorseXCoord -ge 0 -and $seahorseXCoord -lt $script:ScreenWidth -and $seahorse.YCoordinate -ge 0 -and $seahorse.YCoordinate -lt $script:ScreenHeight) {
-                $script:SeahorseMap[($seahorse.YCoordinate * $script:ScreenWidth) + $seahorseXCoord] = @{ Char = $seahorseSprite[$k]; Col = $seahorseColor }
-            }
-        }
-    }
-
-    for ($y = $script:ScreenHeight - 1; $y -ge 0; $y--) {
-        $consoleRow = $script:ScreenHeight - 1 - $y
-
-        if ($y -eq 0) {
-            $currentTimeString = (Get-Date).ToString("hh:mm:ss tt")
-            $legend = " N: New Tank | F: Food | S: Spawn | K: Kill | PgUp/PgDn: Speed ($($script:TickDelay)ms) | Q/Esc: Quit "
-            if ($legend.Length -ge $script:ScreenWidth) {
-                $legend = $legend.Substring(0, $script:ScreenWidth)
-            } else {
-                $remainingSpace = $script:ScreenWidth - $legend.Length - $currentTimeString.Length
-                if ($remainingSpace -lt 0) { $remainingSpace = 0 }
-                $legend = $legend + (" " * $remainingSpace) + $currentTimeString
-            }
-            $legendString = "`e[38;5;244m$legend`e[0m"
-            if ($script:LastRenderBuffer[0, $y] -ne $legendString) {
-                [Console]::SetCursorPosition(0, $consoleRow)
-                [Console]::Write($legendString)
-                $script:LastRenderBuffer[0, $y] = $legendString
-            }
-            continue
-        }
-
-        $waterColor = Get-WaterColor $y
-        for ($x = 0; $x -lt $script:ScreenWidth; $x++) {
-            $cellIndex = ($y * $script:ScreenWidth) + $x
-            $cellString = ""
-
-            if ($x -eq $script:TankSnail.XCoordinate -and $y -eq $script:TankSnail.YCoordinate) {
-                $cellString = "`e[1;38;5;255m@`e[0m"
-            }
-            elseif ($script:JellyfishMap.ContainsKey($cellIndex)) {
-                $jellyInfo = $script:JellyfishMap[$cellIndex]
-                $cellString = "$($jellyInfo.Col)$($jellyInfo.Char)`e[0m"
-            }
-            elseif ($script:SeahorseMap.ContainsKey($cellIndex)) {
-                $seahorseInfo = $script:SeahorseMap[$cellIndex]
-                $cellString = "$($seahorseInfo.Col)$($seahorseInfo.Char)`e[0m"
-            }
-            elseif ($script:AnemoneMap.ContainsKey($cellIndex)) {
-                $anemoneInfo = $script:AnemoneMap[$cellIndex]
-                $cellString = "$($anemoneInfo.Col)$($anemoneInfo.Char)`e[0m"
-            }
-            elseif ($script:DecorationMap.ContainsKey($cellIndex)) {
-                $decorationInfo = $script:DecorationMap[$cellIndex]
-                $cellString = "$($decorationInfo.Col)$($decorationInfo.Char)`e[0m"
-            }
-            else {
-                $currentCell = $script:TankGrid[$x, $y]
-                $inner = switch ($currentCell.Type) {
-                    "air"   { " " }
-                    "sand"  { "`e[1;38;5;136m=`e[0m" }
-                    "glass" { "`e[38;5;25m|`e[0m" }
-                    "food"  { "`e[38;5;172m*`e[0m" }
-                    "plant" {
-                        $swayAmount = [Math]::Round([Math]::Sin(($script:CurrentFrame * 0.05) + (($y-2) * 0.3)) * 1.2)
-                        $plantChar = if ($swayAmount -gt 0) { "/" } elseif ($swayAmount -lt 0) { "\" } else { "|" }
-                        $plantColor = $script:PlantColors[$currentCell.PlantDir % $script:PlantColors.Count]
-                        "${plantColor}${plantChar}`e[0m"
-                    }
-                    "fish" {
-                        $fishSize = Get-FishSize $currentCell.FishType
-                        $fishColor = Get-FishColor $currentCell.FishType
-                        $fishFlavor = Get-FishFlavor $currentCell.FishType
-                        $fishSprite = if ($currentCell.Dir -eq 1) { $script:FishSpritesRight[$fishSize] } else { $script:FishSpritesLeft[$fishSize] }
-                        $fishChar = if ($currentCell.Segment -lt $fishSprite.Length) { $fishSprite[$currentCell.Segment] } else { ">" }
-                        $fishPalette = if ($fishFlavor -eq 1) { $script:TetraColors } else { $script:FishColors }
-                        $segmentColorIndex = ($fishColor + $currentCell.Segment) % $fishPalette.Count
-                        $segmentColor = $fishPalette[$segmentColorIndex]
-                        "${segmentColor}${fishChar}`e[0m"
-                    }
-                    "water" {
-                        if ($script:BubbleMap.ContainsKey($cellIndex)) {
-                            "`e[1;38;5;123m$($script:BubbleMap[$cellIndex])`e[0m"
-                        } else {
-                            "${waterColor}.`e[0m"
-                        }
-                    }
-                    default { " " }
-                }
-                $cellString = $inner
-            }
-
-            if ($script:LastRenderBuffer[$x, $y] -ne $cellString) {
-                [Console]::SetCursorPosition($x, $consoleRow)
-                [Console]::Write($cellString)
-                $script:LastRenderBuffer[$x, $y] = $cellString
-            }
-        }
+    # one write per frame
+    if ($sb.Length -gt 0) {
+        [void]$sb.Insert(0, "${ESC}[?2026h")
+        [void]$sb.Append("${ESC}[?2026l")
+        [Console]::Out.Write($sb.ToString())
     }
 }
 
 # ---------- Start ----------
+$originalEncoding = [Console]::OutputEncoding
+[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false
+
 Initialize-World ([Console]::WindowWidth) ([Console]::WindowHeight - 1)
 
+$frameTimer = [System.Diagnostics.Stopwatch]::new()
 while (-not $script:ShouldQuit) {
+    $frameTimer.Restart()
     Get-Input
     if ($script:ShouldQuit) { break }
-    Update-World
+    Update-Resize
+    if (-not $script:IsPaused) { Update-World }
     Draw-World
-    if ($script:TickDelay -gt 0) {
-        [System.Threading.Thread]::Sleep($script:TickDelay)
+
+    # TickDelay is the frame time, time spent working counts toward it
+    $remaining = $script:TickDelay - $frameTimer.ElapsedMilliseconds
+    if ($script:IsPaused) { $remaining = [Math]::Max($remaining, 33) }   # don't spin while paused
+    if ($remaining -gt 0) {
+        [System.Threading.Thread]::Sleep([int]$remaining)
     }
 }
 
+[Console]::OutputEncoding = $originalEncoding
 [Console]::CursorVisible = $true
 [Console]::Clear()
